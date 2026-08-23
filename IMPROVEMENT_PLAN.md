@@ -25,36 +25,44 @@ Analysis of [Track_it.py](Track_it.py) as it stands today, and a proposed restru
 
 ## Proposed structure
 
-Small project, so keep it flat — a `src/` package with a clear layer split, not a deep tree.
+Small project — `src/` at the repo root (no redundant nested package folder), with files grouped into subfolders by layer.
 
 ```
-trackitboardit/
-├── CLAUDE.md
-├── README.md
-├── requirements.txt
-├── .env.example
-├── .gitignore
-├── sql/
-│   └── schema.sql              # CREATE TABLE statements (currently undocumented)
-├── src/
-│   └── trackitboardit/
-│       ├── __init__.py
-│       ├── main.py             # entry point: the menu loop only
-│       ├── config.py           # reads DB_HOST/DB_USER/DB_PASSWORD/DB_NAME from env
-│       ├── db.py               # connection factory (context manager, reconnect-safe)
-│       ├── models.py           # Bus, Passenger, Driver as plain dataclasses (no I/O)
-│       ├── repositories.py     # all raw SQL, one function per query
-│       ├── services.py         # auth (hashing) + matching (distance/ETA/filter) logic
-│       └── cli.py              # all rich Prompt/Console/Table code
-└── tests/
-    ├── test_services_matching.py   # haversine + filter_buses, pure functions, no DB
-    └── test_services_auth.py       # hashing/verification logic
+README.md
+requirements.txt
+.env.example
+.gitignore
+sql/
+└── schema.sql              # CREATE TABLE statements (currently undocumented)
+src/
+├── __init__.py
+├── main.py                 # entry point: the menu loop only
+├── config.py                # reads DB_HOST/DB_USER/DB_PASSWORD/DB_NAME from env
+├── db/
+│   ├── __init__.py
+│   └── connection.py        # connection factory (context manager, reconnect-safe)
+├── models/
+│   ├── __init__.py
+│   └── entities.py           # Bus, Passenger, Driver as plain dataclasses (no I/O)
+├── repositories/
+│   ├── __init__.py
+│   └── users.py              # all raw SQL, one function per query
+├── services/
+│   ├── __init__.py
+│   ├── auth.py                # password hashing/verification
+│   └── matching.py            # haversine distance / ETA / route filtering
+└── cli/
+    ├── __init__.py
+    └── menu.py                # all rich Prompt/Console/Table code
+tests/
+├── test_services_matching.py   # haversine + filter_buses, pure functions, no DB
+└── test_services_auth.py       # hashing/verification logic
 ```
 
 **Layer rules:**
-- `repositories.py` is the only file allowed to import `mysql.connector` or write SQL.
-- `services.py` contains business logic (haversine distance, ETA, route filtering, password hashing) as plain functions — no `rich`, no `input()`, no SQL. This is what unit tests target.
-- `cli.py` is the only file allowed to import `rich` or call `Prompt.ask`/`input`. It calls into `services` and `repositories`.
+- `repositories/` is the only package allowed to import `mysql.connector` or write SQL.
+- `services/` contains business logic (haversine distance, ETA, route filtering, password hashing) as plain functions — no `rich`, no `input()`, no SQL. This is what unit tests target.
+- `cli/` is the only package allowed to import `rich` or call `Prompt.ask`/`input`. It calls into `services` and `repositories`.
 - `main.py` just wires the menu loop, ~20 lines.
 
 ## Minimal code sketch
@@ -72,12 +80,12 @@ DB_CONFIG = {
 }
 ```
 
-`db.py` — connection as a context manager, not a module-level global:
+`db/connection.py` — connection as a context manager, not a module-level global:
 
 ```python
 from contextlib import contextmanager
 import mysql.connector
-from .config import DB_CONFIG
+from ..config import DB_CONFIG
 
 @contextmanager
 def get_cursor():
@@ -90,10 +98,10 @@ def get_cursor():
         conn.close()
 ```
 
-`repositories.py` — one function per query, always uses `get_cursor()`:
+`repositories/users.py` — one function per query, always uses `get_cursor()`:
 
 ```python
-from .db import get_cursor
+from ..db.connection import get_cursor
 
 def find_user(role: str, username: str) -> dict | None:
     table = "drivers" if role == "driver" else "passengers"
@@ -112,7 +120,7 @@ def create_user(role: str, username: str, password_hash: str) -> bool:
 
 (`table` is chosen from a fixed `{"driver", "passenger"}` set validated by the caller before it reaches here — never from raw user input — so this stays injection-safe despite the f-string.)
 
-`services.py` — pure logic, hashing instead of plaintext, unit-testable with no DB or terminal:
+`services/auth.py` and `services/matching.py` — pure logic, hashing instead of plaintext, unit-testable with no DB or terminal:
 
 ```python
 import math
@@ -134,7 +142,7 @@ def haversine_km(lat1, lon1, lat2, lon2) -> float:
 `main.py` — the whole entry point:
 
 ```python
-from .cli import run_menu
+from .cli.menu import run_menu
 
 def main():
     run_menu()
@@ -146,8 +154,8 @@ if __name__ == "__main__":
 ## Migration order
 
 1. Add `.env` + `config.py`, stop hardcoding credentials — smallest change, removes the biggest security smell.
-2. Extract `repositories.py` from the existing SQL calls; fix the missing `commit()` bug while doing it.
-3. Extract `services.py` (haversine + `filter_buses` + hashing); write the two test files against it — this is the first code in the project that's testable without MySQL running.
-4. Extract `cli.py`, replace `int(Prompt.ask(...))` with `rich.prompt.IntPrompt.ask(...)` to fix the crash-on-bad-input bug.
+2. Extract `repositories/users.py` from the existing SQL calls; fix the missing `commit()` bug while doing it.
+3. Extract `services/matching.py` and `services/auth.py` (haversine + `filter_buses` + hashing); write the two test files against them — this is the first code in the project that's testable without MySQL running.
+4. Extract `cli/menu.py`, replace `int(Prompt.ask(...))` with `rich.prompt.IntPrompt.ask(...)` to fix the crash-on-bad-input bug.
 5. Shrink `Track_it.py` down to `main.py` and delete it.
-6. Write `sql/schema.sql` from the live DB (`mysqldump --no-data trackitboardit`) so the schema is no longer only inferable from SQL strings scattered across the code.
+6. Write `sql/schema.sql` from the live DB (`mysqldump --no-data <db_name>`) so the schema is no longer only inferable from SQL strings scattered across the code.
